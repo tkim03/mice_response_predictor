@@ -30,6 +30,7 @@ Variables:
 - brain_area: area of the brain where each neuron lives
 
 Contrast Conditions:
+
 - left contrast > right contrast: turn wheel left is a success
 - left contrast < right contrast: turn wheel right is a success
 - left contrast = right contrast, but not equal to 0: left or right is randomly chosen as success
