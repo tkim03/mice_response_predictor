@@ -1,0 +1,192 @@
+---
+title: "Mice Response Predictor"
+author: "Terrie Kim"
+output: html_document
+---
+
+
+## Abstract 
+
+The study by Steinmetz et al. (2019) explores the neurological activity of different mice over the course of several sessions and trials. The goal of this project is to take the data from the study and build a predictive model in order to emulate the mices' responses. Sessions 1 through 18 of the experiment are used as training data for the model. This project consists of multiple steps including exploring and manipulating the data as well as training different binary classification models. The models are evaluated and compared, with the one exhibiting the best performance chosen as the final model based on accuracy and other parameters. This project was completed with the use of RStudio and various installable packages.
+
+
+
+
+## Introduction
+
+The research investigated the mice and their ability to discern differences in contrasts, with their response determined by the direction the wheel was spun. The portion of experiment data from Steinmetz et al. (2019) used in this project consists of eighteen sessions, each with a varying number of trials. These eighteen trials were conducted across four distinct mice, their names recorded in the data. Each trial had five variables: feedback_type, contrast_left, contrast_right, time, spks, and brain_area. 
+
+First, I started with exploratory data analysis. In this step, I created various plots and graphs to visualize the data in order to further my initial analysis. Through this step, I was able to better my understanding of the data and select variables that I felt were significant to the mices' responses.
+
+Next, I created a data set which contained manipulated data derived from the original data. This data was then used for the training and testing of the binary classification models. After running and evaluating my models, I adjusted the manipulated data, removing and adding different predictors. I repeated this process of changing predictors and training models until the results were satisfactory. From there, I chose the model that produced the most favorable results as my final model.
+
+Variables:
+
+- feedback_type: type of the feedback, 1 for success and -1 for failure
+- contrast_left: contrast of the left stimulus
+- contrast_right: contrast of the right stimulus
+- time: centers of the time bins for spks
+- spks: numbers of spikes of neurons in the visual cortex in time bins defined in time
+- brain_area: area of the brain where each neuron lives
+
+Contrast Conditions:
+- left contrast > right contrast: turn wheel left is a success
+- left contrast < right contrast: turn wheel right is a success
+- left contrast = right contrast, but not equal to 0: left or right is randomly chosen as success
+- left contrast and right contrast = 0: hold still is a success
+
+Libraries/Packages Used:
+
+- tidyverse
+- xgboost
+- glmnet
+- class
+- e1071
+- caret
+- randomForest
+
+
+
+
+## Exploratory Analysis
+
+In order to gain a better understanding of the data overall, I created a data frame named data.overview which listed information for each session. To do this, I found the mouse names, number of trials, average success rate, and number of unique neurons. 
+
+I was most interested in visualizing the contrasts and feedback types for each session. I subset the data based on the contrast conditions provided by the study. For example, I created a data frame l.r_contrast consisting of the data for trials in which the left contrast was higher than the right contrast. For each session, I plotted a grid of four bar charts, one for every contrast condition. The bar charts had two bars, one for the proportion of -1 or failure responses and another for the proportion of 1 or success responses. This showed that the mice consistently responded with more success to the conditions in which one contrast is higher than the other. It seemed like when the left and right contrast are equal, regardless if they are equal to 0, the mice have a harder time responding successfully.
+
+Contrast Bar Charts for Session 18:
+
+![](./figures/eda1.png){width=50%}
+
+
+I then explored the spks variable, manipulating the data such that my data frame displayed the number of spikes in neural activity and the average spikes in neural activity for each trial. The spks variable's data was originally presented as a matrix. In order do such manipulation, I utilized the apply() function along with sum before calculating the mean. Following this, I created a new data frame to display the mean spikes for success and failure in each session. I observed that success consistently had a higher average of neural activity spikes than failure in each respective session. While this shows a potential relationship within each session, this does not necessarily apply across sessions. This lead me to believe that average spikes would be an important predictor in the future models. 
+
+Average Spikes for Each Feedback Type:
+
+![](./figures/eda2.png){width=30%}
+
+
+To explore homogeneity of the data across mice, I split the data by the mouse_name variable. By doing so, I was able to calculate the average spikes and average success rate for the four mice. I plotted this information in two bar charts. The chart for spikes showed a significant difference in average spikes across different mice. The success rate chart showed subtle differences in success rates with the lowest being 0.605 and the highest being 0.667. Although the data frame that I used to explore the spks variable did show that successes had higher average spikes than their counterparts, these graphs show that this concept does not translate across mice. Cori, for example, had the highest average spikes but also the lowest success rate. Due to the heterogeneous nature of the average spikes, I decided to also consider the names of the mice as a possible predictor.
+
+Average Spikes and Success Rate by Mouse:
+
+![](./figures/eda3.png){width=100%}
+
+Furthermore, I explored the success rate and its relationship to the number of neurons in each session. To do this, I used dplyr pipes to manipulate the data.overview data frame, group by the number of neurons, and find the average success rate regardless of mouse name. Then, I used a bar chart to visualize the data. I found that while success rate and number of neurons do not seem to have a linear relationship, having a certain number of neurons could relate to higher success rates. Six neurons seemed to give the best performance while thirteen gave the worst performance. For this reason, I noted number of neurons as another potential predictor.
+
+Average Success Rate by Number of Neurons:
+
+![](./figures/eda4.png){width=50%}
+
+
+
+
+## Data Integration
+
+Using the potential predictors from the exploratory data analysis as a guide, I made a data frame named all_data which disregards session number, making all of the trial data easier to work with. To all_data, I added feedback_type, mouse, contrast, avg_spks, and num_neu. 
+
+The feedback_type variable is the same feedback_type variable from the trial data. However, I adjusted this data such that it returns binary values for success and failure rather than -1 and 1. This will help later on when handling and comparing model predictions. Since most of the models will only accept numerical inputs, I decided to represent each mouse name with a number (i.e. Cori = 1) in the new mouse variable. Similar to the mouse variable, I created the contrast variable and represented each of the contrast conditions as numbers from 1 to 4. I also added avg_sks which represents the average spikes in neural activity for each trial and num_neu which represents the number of neurons present. I had contemplated also adding num_spks as a variable to represent the number of spikes in each trial. However, I decided against it as it felt redundant considering the avg_sks variable. This entire process was done using for-loops and temporary variables to bypass the session number restriction. After going through each session, the new data is added to the all_data data frame through rbind().
+
+The First 6 Rows in all_data:
+
+![](./figures/dataint.png){width=50%}
+
+
+
+
+## Predictive Modeling
+
+Before starting the process of training models, I split my data into a training and testing set through sampling, allocating 80% to training. For both sets of data, X represented all predictors and y represented the feedback_type. Furthermore, I decided to transpose the y portion of the data to make it more compatible for model training. 
+
+After doing research, I decided on these binary classification models: XGBoost, Logistic Regression, K-Means Clustering, Support Vector Machine, Random Forest, and Naive Bayes.
+
+When training my XGBoost model, I found difficulty in choosing a reasonable value for the nrounds parameter. I decided to try using early stopping to determine this value. The method of early stopping that I used found the best iteration based on whether or not the error improves after ten consecutive rounds. This gave me an nrounds of 381.  However, I found when looking at the performance of the model with the test data that the default nrounds of 100 produced better results. This lead me to believe that there was potential for my model to be overfit to the training data. For this reason, I decided against choosing XGBoost as my final model. 
+
+Early Stopping Output:
+
+![](./figures/mod2.png){width=20%}
+
+For logistic regression, I used the formula feedback_type~. to find relationships between feedback_type and all predictors. I set the family parameter to binary in order to employ the logistic regression's binary specifications. Reviewing the model summary after training solidified my confidence in the selected predictors as each produced significant p-values. When evaluating the model with the test data, the predictions had to be transformed into binary values by using an if statement and a threshold of 0.5.
+
+Logistic Regression Summary:
+
+![](./figures/mod3.png){width=40%}
+
+Similarly, I used the feedback_type~. formula for the support vector model (SVM). Since the data showed little linearity, I used the parameter kernel="radial" allowed the model to handle non-linear decision boundaries. The predictions from this model also had to be converted to binary using if statements.
+
+To determine the k value for the k-means clustering method, I performed model training on a scale of k values from 1 to 30. From there, I calculated the error rate by finding the number of incorrect prediction over total predictions and plotted them, applying the elbow method to choose a k value. The plot displayed a lack of significant slope change after the k=23 point, leading me to select 23 as the k value for my model. The predictions given from the test data were returned in binary format.
+
+Elbow Method Plot:
+
+![](./figures/mod1.png){width=50%}
+
+Random forest and naive Bayes also used the same formula as logistic regression and SVM. For random forest, I used the default ntree value of 500. The predicted values from this model were manipulated into binary format using the round() function. The predictions from naive Bayes, on the other hand, did not need this adjustment as they were given as binary values.
+
+For each model and their respective predictions, I created a confusion matrix for visualization. On top of the visualization, I used the confusion matrix to calculate precision and the f1 score of each model. I did this by finding the true and false positives and negatives. Each model's accuracy was calculated by finding the number of correct predictions over the total number of predictions.
+
+XGBoost:
+
+- Precision: 0.7558
+- F1 Score: 0.4715
+- Accuracy:  0.6686
+
+Logistic Regression: 
+
+- Precision: 0.7198
+- F1 Score: 0.0793
+- Accuracy:  0.704
+
+Support Vector Machine:
+
+- Precision: 0.7229
+- F1 Score: 0.0667
+- Accuracy:  0.7178
+
+K-Means Clustering:
+
+- Precision: 0.7659
+- F1 Score: 0.4246
+- Accuracy:  0.7325
+
+Random Forest:
+
+- Precision: 0.7278
+- F1 Score: 0.1039
+- Accuracy:  0.7257
+
+Naive Bayes:
+
+- Precision: 0.7249
+- F1 Score: 0.1099
+- Accuracy:  0.7139
+
+Looking at the model performances, k-means clustering performed the best with the highest precision and accuracy as well as a high precision. XGBoost had the highest f1 score, however, it falls short in both precision and accuracy when compared to k-means clustering.
+
+Final Model: K-Means Clustering (with k = 23)
+
+Confusion Matrix for K-Means Clustering:
+
+![](./figures/km.png){width=50%}
+
+
+## Prediction Performance
+
+The new test data was imported and manipulated to create a data frame. It was then run with the k-means clustering model.
+
+- Precision: 0.8322
+- F1 Score: 0.659
+- Accuracy:  0.77
+
+Confusion Matrix for K-Means Clustering with New Testing Data
+
+![](./figures/test.png){width=50%}
+
+
+
+## Discussion
+
+In conclusion, I chose k-means clustering through the comparison of model performance after the integration of data and training of models. The model performed better than expected with the new test data, achieving an accuracy of 77%. The precision and f1 score were also high when looking back at my previous test data performance scores. Reflecting on the project, the exploratory data analysis and data integration portions were the most difficult for me. It was interesting to work with data without having a clear direction, trying to find patterns and significance in certain variables.
+
+## Reference
+
+Steinmetz, N.A., Zatka-Haas, P., Carandini, M. et al. Distributed coding of choice, action and engagement across the mouse brain. Nature 576, 266–273 (2019). https://doi.org/10.1038/s41586-019-1787-x

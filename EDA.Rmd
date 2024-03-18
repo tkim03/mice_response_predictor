@@ -1,0 +1,248 @@
+---
+title: "Project"
+author: "Terrie Kim"
+output: html_document
+---
+```{r}
+session=list()
+for(i in 1:18){
+  session[[i]] = readRDS(paste('./Data/session',i,'.rds',sep=''))
+}
+```
+
+# EDA
+```{r}
+library(tidyverse)
+library(gridExtra)
+```
+
+
+### Overview
+```{r}
+data.overview <- data.frame(session = integer(),
+                             mouse_name = character(),
+                             trials = integer(),
+                             correct = numeric(),
+                             neurons = integer())
+
+for (i in 1:18){
+  data.overview[i, "session"] <- i
+  data.overview[i, "mouse_name"] <- session[[i]]$mouse_name
+  data.overview[i, "trials"] <- length(session[[i]]$contrast_left)
+  data.overview[i, "correct"] <- round(sum(session[[i]]$feedback_type == 1) / length(session[[i]]$feedback_type), 3)
+  data.overview[i, "neurons"] <- length(unique(session[[i]]$brain_area))
+}
+
+data.overview
+```
+
+### Overall Success
+```{r}
+correct = 0
+trials = 0
+
+for(i in 1:18){
+    trials = trials + length(session[[i]]$feedback_type);
+    correct = correct + sum(session[[i]]$feedback_type == 1);
+}
+paste0("Overall Success Rate: ", correct/trials)
+```
+
+### Success Rate and Neurons
+```{r}
+neu <- data.overview %>% group_by(neurons) %>% summarize(correct = mean(correct))
+ggplot(data=neu, aes(x=neurons, y=correct)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  labs(x = "Number of Neurons", y = "Average Success Rate", title = "Average Success Rate vs. Number of Neurons")
+```
+
+### Feedback Type Plots
+```{r}
+# choosing visible colors
+pcolor <- c("red", "green", "blue", "cyan", "magenta", "darkmagenta", "orange", "purple", "deeppink", "darkblue", "darkgreen", "maroon", "darkolivegreen", "chocolate4", "coral", "darkorchid", "darkslategrey", "gold")
+```
+
+```{r}
+# new list consisting of only contrast and feedback
+c.f = list()
+for(i in 1:18){
+  nam <- c("contrast_left", "contrast_right", "feedback_type")
+  c.f[[i]] <- session[[i]][nam, drop=FALSE]
+  c.f[[i]] <- as.data.frame(c.f[[i]])
+}
+
+for (temp in 1:18){
+  df = c.f[[temp]] #sets df to the data frame for a specific session
+  
+  # subsetting the data based on conditions for success
+  l.r_contrast <- subset(df, df$contrast_left > df$contrast_right)
+  r.l_contrast <- subset(df, df$contrast_right > df$contrast_left)
+  equal_contrast <- subset(df, df$contrast_left == df$contrast_right & df$contrast_left != 0 & df$contrast_right != 0)
+  zero_contrast <- subset(df, df$contrast_left == 0 & df$contrast_right == 0)
+  
+  # creating as table that shows the proportions of success and failure
+  left.greater.right <- as.data.frame(prop.table(table(l.r_contrast$feedback_type)))
+  right.greater.left <- as.data.frame(prop.table(table(r.l_contrast$feedback_type)))
+  equal.contrast <- as.data.frame(prop.table(table(equal_contrast$feedback_type)))
+  zero.contrast <- as.data.frame(prop.table(table(zero_contrast$feedback_type)))
+
+  # to help the for loop run / for formatting
+  dt <- list(left.greater.right, right.greater.left, equal.contrast, zero.contrast)
+  names(dt) <- c("Left Contrast > Right Contrast", "Right Contrast > Left Contrast", "Left Contrast = Right Contrast",
+                 "Left Contrast & Right Contrast are 0")
+  plots.cf <- list()
+  
+  # plotting the proportions
+  for (i in 1:4){
+    plots.cf[[i]] <-
+      ggplot(dt[[i]], aes(x = Var1, y = Freq)) +
+        geom_bar(stat = "identity", fill = pcolor[temp], color="black") +
+        labs(title = names(dt)[i], x = "Feedback Type", y = "Prop")
+  }
+  
+  # printing the plots in a 2x2 format
+  grid.arrange(grobs = plots.cf, ncol = 2, top=paste0("Session", temp))
+}
+```
+
+### Number of Unique Neurons throughtout the WHOLE dataset
+```{r}
+neu = list()
+num.neu = 0
+
+# filtering through to get the unique neurons in each session
+for(i in 1:18){
+  temp <- as.data.frame(session[[i]]["brain_area", drop=FALSE])
+  neu <- c(neu, unlist(temp))
+}
+
+unique_neu <- unique(neu)
+
+# returns unique neurons from all sessions
+paste0("Number of Unique Neurons: ", length(unique_neu))
+```
+```{r}
+c.f.s <- c.f
+
+# finding the number of spikes in each trial per session
+for (i in 1:18) {
+  spks <- session[[i]]$spks
+  session_trial_sums <- numeric(length(spks))
+  session_trial_avgs <- numeric(length(spks))
+  
+  for (j in seq_along(spks)) {
+    trial_sum <- apply(spks[[j]], 1, sum)
+    session_trial_sums[j] <- sum(trial_sum)
+    trial_avg <- mean(trial_sum)
+    session_trial_avgs[j] <- trial_avg
+  }
+  
+  # adding the spikes to a new df that includes contrast and feedback
+  c.f.s[[i]]$num_spks <- session_trial_sums
+  c.f.s[[i]]$avg_spks <- round(session_trial_avgs, 3)
+}
+
+head(c.f.s[[1]])
+```
+
+
+```{r}
+table_data <- matrix(nrow = 18, ncol = 2)
+
+for (i in 1:18) {
+  mean_spks <- aggregate(avg_spks ~ feedback_type, data = c.f.s[[i]], FUN = mean)
+  
+  table_data[i, 1] <- mean_spks[mean_spks$feedback_type == -1, "avg_spks"]
+  table_data[i, 2] <- mean_spks[mean_spks$feedback_type == 1, "avg_spks"]
+}
+
+table_df <- as.data.frame(table_data)
+rownames(table_df) <- 1:18
+
+colnames(table_df) <- c("Mean Spks for Failure", "Mean Spks for Success")
+
+print(table_df)
+```
+
+
+### Homogeneity: Sessions
+```{r}
+hom.ses <- data.frame(numeric(18))
+
+for (i in 1:18) {
+  hom.ses$session[i] <- i
+  hom.ses$spks[i] <- mean(c.f.s[[i]]$avg_spks)
+  hom.ses$feedback[i] <- round(sum(session[[i]]$feedback_type == 1) / length(session[[i]]$feedback_type), 3)
+}
+```
+
+```{r}
+ggplot(hom.ses, aes(x=session)) +
+  geom_line(aes(y = spks, color = "Spikes"), size = 1) +
+  geom_line(aes(y = feedback, color = "Feedback"), size = 1) +
+  labs(title = "Homogeneity Across Sessions (Correct Feedback Rate and Spikes)", x = "Session", y = "Averages") +
+  scale_color_manual(values = c("Spikes" = "blue", "Feedback" = "red"), name = "Lines")
+```
+
+### Homogeneity: Mice
+```{r}
+cfsm <- c.f.s
+for (i in 1:18){
+  cfsm[[i]]$mouse <- session[[i]]$mouse_name
+}
+
+m.names <- unique(unlist(lapply(cfsm, `[[`, "mouse")))
+
+
+bymouse <- list()
+for (mouse_name in m.names) {
+  subset_data <- lapply(cfsm, function(x) x[x$mouse == mouse_name, ])
+  bymouse[[mouse_name]] <- do.call(rbind, subset_data)
+}
+```
+
+
+```{r}
+hom.mouse <- data.frame(mouse = character(4), spks = numeric(4), feedback = numeric(4))
+
+for (i in 1:4) {
+  nam <- m.names[i]
+  hom.mouse$mouse[i] <- nam
+  
+  temp <- data.frame(numeric(length(bymouse[[nam]])))
+  
+  for (j in 1:length(bymouse[[nam]])) {
+    temp$spks[j] <- mean(bymouse[[nam]]$avg_spks)
+    temp$feedback[j] <- data.overview$correct[i]
+  }
+  
+  hom.mouse$spks[i] <- round(mean(temp$spks), 3)
+  hom.mouse$feedback[i] <- round(mean(temp$feedback), 3)
+}
+```
+
+```{r}
+ggplot(hom.mouse, aes(x = mouse, y = spks, fill = mouse)) +
+  geom_bar(stat = "identity") +
+  labs(x="name", y="spks", title="Average Spikes per Mouse") +
+  geom_text(aes(label=spks), vjust=-0.5)
+
+ggplot(hom.mouse, aes(x = mouse, y = feedback, fill = mouse)) +
+  geom_bar(stat = "identity") +
+  labs(x="name", y="success rate", title="Average Success Rate per Mouse") +
+  geom_text(aes(label=feedback), vjust=-0.5)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+

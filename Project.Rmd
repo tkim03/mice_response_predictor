@@ -1,0 +1,466 @@
+---
+title: "Model"
+author: "Terrie Kim"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(xgboost)
+library(glmnet)
+library(class)
+library(e1071)
+library(caret)
+library(randomForest)
+```
+
+## Preparing Data
+```{r}
+session=list()
+for(i in 1:18){
+  session[[i]] = readRDS(paste('./Data/session',i,'.rds',sep=''))
+}
+```
+
+```{r}
+# creating a new, empty data frame to start data integration
+all_data <- as.data.frame(matrix(ncol = 0, nrow = 0))
+
+for (sesnum in 1:18){
+  tmp <- session[[sesnum]]
+  len <- length(tmp$contrast_left)
+  
+  temp_data <- tibble(
+      # make the feedback binary instead of -1 and 1
+      feedback_type = (tmp$feedback_type + 1)/2, 
+      mouse = rep(0, len),
+      contrast = rep(0, len),
+      avg_spks = rep(0, len),
+      #num_spks = rep(0, len)
+      num_neu = rep(0, len)
+  )
+  
+  
+  
+  for (i in 1:len){
+    # neurons
+      temp_data$num_neu[i] <- length(unique(tmp$brain_area))
+      
+    # mouse
+      if (tmp$mouse_name == "Cori"){
+          temp_data$mouse[i] <- 1 
+      } else if (tmp$mouse_name == "Forssmann"){
+          temp_data$mouse[i] <- 2 
+      } else if (tmp$mouse_name == "Hench"){
+          temp_data$mouse[i] <- 3 
+      } else{
+          temp_data$mouse[i] <- 4 
+      }
+ 
+    # contrast
+      if (tmp$contrast_left[i] > tmp$contrast_right[i]){
+          temp_data$contrast[i] <- 1 
+      } else if (tmp$contrast_right[i] > tmp$contrast_left[i]){
+          temp_data$contrast[i] <- 2 
+      } else if (tmp$contrast_left[i] == tmp$contrast_right[i] 
+                 & tmp$contrast_left[i] == 0){
+          temp_data$contrast[i] <- 3 
+      } else{
+          temp_data$contrast[i] <- 4 
+      }
+      
+    # average spikes
+      spks <- tmp$spks[[i]]
+      tspikes <- apply(spks, 1, sum)
+      #temp_data$num_spikes[i] <- sum(tspikes)
+      temp_data$avg_spks[i] <- mean(tspikes)
+  }
+  
+  # adding the data to the all_data data frame
+  all_data <- rbind(all_data, temp_data)
+}
+```
+
+```{r}
+head(all_data)
+```
+
+
+```{r}
+set.seed(11)
+
+# allocating 80% of data to training set
+index <- sample.int(n = nrow(all_data), size = floor(.8 * nrow(all_data)), replace = F)
+train <- all_data[index, ]
+test  <- all_data[-index, ]
+
+# check to make sure dimensions are correct
+dim(train)
+dim(test)
+
+# splitting the train data by feedback_type and transposing the y
+X_train <- train[, -1]
+y_train <- t(train[, 1])
+
+X_test <- test[, -1]
+y_test <- t(test[, 1])
+```
+
+## XGBoost Model
+
+```{r}
+# using early stopping to determine nrounds
+xgb_model <- xgboost(data = as.matrix(X_train), label = y_train, nrounds = 1000,
+                     eval_metric = "error", early_stopping_rounds = 10)
+```
+
+```{r}
+xgb <- xgboost(data = as.matrix(X_train), label = y_train, nrounds=381, eval_metric = "error", verbose = 0)
+```
+
+```{r}
+xg_pred <- predict(xgb, as.matrix(X_test))
+
+# rounding predictions to either 0 or 1
+xg_pred <- round(xg_pred)
+```
+
+```{r}
+xg_cm <- confusionMatrix(as.factor(xg_pred), as.factor(y_test), dnn = c("Predicted", "Actual"))
+
+xg_plt <- as.data.frame(xg_cm$table)
+
+ggplot(xg_plt, aes(Actual, Predicted, fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="lightblue", high="turquoise") +
+        labs(x = "Actual",y = "Prediction") +
+        scale_x_discrete(labels=c("0","1")) +
+        scale_y_discrete(labels=c("0","1"))
+
+TP <- xg_cm$table[2, 2]
+FP <- xg_cm$table[2, 1]
+
+xg_prec <- TP / (TP + FP)
+
+xg_rec <- xg_cm$byClass[["Sensitivity"]]
+
+# Calculate F1 score
+xg_f1 <- 2 * (xg_prec * xg_rec) / (xg_prec + xg_rec)
+
+# Print precision and F1 score
+print(paste("Precision:", round(xg_prec, 4)))
+print(paste("F1 Score:", round(xg_f1, 4)))
+print(paste("Accuracy: ", round(mean(xg_pred == y_test), 4)))
+```
+
+
+## Logistic Regression
+
+```{r}
+lg <- glm(feedback_type ~ ., data = train, family = binomial)
+
+summary(lg)
+```
+```{r}
+lg_pred <- predict(lg, X_test, type = "response")
+
+# making predictions binary
+lg_pred <- ifelse(lg_pred >= 0.5, 1, 0)
+```
+
+```{r}
+lg_cm <- confusionMatrix(as.factor(lg_pred), as.factor(y_test), dnn = c("Predicted", "Actual"))
+
+lg_plt <- as.data.frame(lg_cm$table)
+
+ggplot(lg_plt, aes(Actual, Predicted, fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="lightblue", high="turquoise") +
+        labs(x = "Actual",y = "Prediction") +
+        scale_x_discrete(labels=c("0","1")) +
+        scale_y_discrete(labels=c("0","1"))
+
+TP <- lg_cm$table[2, 2]
+FP <- lg_cm$table[2, 1]
+
+lg_prec <- TP / (TP + FP)
+
+lg_rec <- lg_cm$byClass[["Sensitivity"]]
+
+# Calculate F1 score
+lg_f1 <- 2 * (lg_prec * lg_rec) / (lg_prec + lg_rec)
+
+# Print precision and F1 score
+print(paste("Precision:", round(lg_prec, 4)))
+print(paste("F1 Score:", round(lg_f1, 4)))
+print(paste("Accuracy: ", round(mean(lg_pred == y_test), 4)))
+```
+
+
+## SVM
+
+```{r}
+svm_m <- svm(feedback_type ~ ., data = train, kernel = "radial")
+
+svm_pred <- predict(svm_m, X_test)
+
+svm_pred <- ifelse(svm_pred >= 0.5, 1, 0)
+```
+
+```{r}
+svm_cm <- confusionMatrix(as.factor(svm_pred), as.factor(y_test), dnn = c("Predicted", "Actual"))
+
+svm_plt <- as.data.frame(svm_cm$table)
+
+ggplot(svm_plt, aes(Actual, Predicted, fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="lightblue", high="turquoise") +
+        labs(x = "Actual",y = "Prediction") +
+        scale_x_discrete(labels=c("0","1")) +
+        scale_y_discrete(labels=c("0","1"))
+
+TP <- svm_cm$table[2, 2]
+FP <- svm_cm$table[2, 1]
+
+svm_prec <- TP / (TP + FP)
+
+svm_rec <- svm_cm$byClass[["Sensitivity"]]
+
+# Calculate F1 score
+svm_f1 <- 2 * (svm_prec * svm_rec) / (svm_prec + svm_rec)
+
+# Print precision and F1 score
+print(paste("Precision:", round(svm_prec, 4)))
+print(paste("F1 Score:", round(svm_f1, 4)))
+print(paste("Accuracy: ", round(mean(svm_pred == y_test), 4)))
+```
+
+
+
+## k-means Clustering
+
+```{r}
+error_rates <- numeric(length = 30)
+
+for (k in 1:30) {
+  knnc <- knn(train = X_train, test = X_test, cl = y_train, k = k)
+
+  error_rate <- mean(knnc != y_test)
+
+  error_rates[k] <- error_rate
+}
+
+# use elbow method to choose k
+plot(1:30, error_rates, type = "b", pch = 19, col = "blue", xlab = "k", ylab = "Error Rate", main = "Elbow Method")
+```
+
+```{r}
+knn_pred <- knn(train = X_train, test = X_test, cl = y_train, k = 23)
+
+knn_cm <- confusionMatrix(as.factor(knn_pred), as.factor(y_test), dnn = c("Predicted", "Actual"))
+
+knn_plt <- as.data.frame(knn_cm$table)
+
+ggplot(knn_plt, aes(Actual, Predicted, fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="lightblue", high="turquoise") +
+        labs(x = "Actual",y = "Prediction") +
+        scale_x_discrete(labels=c("0","1")) +
+        scale_y_discrete(labels=c("0","1"))
+
+TP <- knn_cm$table[2, 2]
+FP <- knn_cm$table[2, 1]
+
+knn_prec <- TP / (TP + FP)
+
+knn_rec <- knn_cm$byClass[["Sensitivity"]]
+
+# Calculate F1 score
+knn_f1 <- 2 * (knn_prec * knn_rec) / (knn_prec + knn_rec)
+
+# Print precision and F1 score
+print(paste("Precision:", round(knn_prec, 4)))
+print(paste("F1 Score:", round(knn_f1, 4)))
+print(paste("Accuracy: ", round(mean(knn_pred == y_test), 4)))
+
+save(knn_pred, file = "knn_pred.RData")
+```
+
+
+
+## Random Foreset
+```{r}
+rf <- randomForest(feedback_type ~ ., data = train, ntree = 500)
+
+rf_pred <- predict(rf, X_test)
+rf_pred <- round(rf_pred)
+```
+
+```{r}
+rf_cm <- confusionMatrix(as.factor(rf_pred), as.factor(y_test), dnn = c("Predicted", "Actual"))
+
+rf_plt <- as.data.frame(rf_cm$table)
+
+ggplot(rf_plt, aes(Actual, Predicted, fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="lightblue", high="turquoise") +
+        labs(x = "Actual",y = "Prediction") +
+        scale_x_discrete(labels=c("0","1")) +
+        scale_y_discrete(labels=c("0","1"))
+
+TP <- rf_cm$table[2, 2]
+FP <- rf_cm$table[2, 1]
+
+rf_prec <- TP / (TP + FP)
+
+rf_rec <- rf_cm$byClass[["Sensitivity"]]
+
+# Calculate F1 score
+rf_f1 <- 2 * (rf_prec * rf_rec) / (rf_prec + rf_rec)
+
+# Print precision and F1 score
+print(paste("Precision:", round(rf_prec, 4)))
+print(paste("F1 Score:", round(rf_f1, 4)))
+print(paste("Accuracy: ", round(mean(rf_pred == y_test), 4)))
+```
+
+## Naive Bayes
+
+```{r}
+nb <- naiveBayes(feedback_type ~ ., data = train)
+
+nb_pred <- predict(nb, X_test)
+```
+
+```{r}
+nb_cm <- confusionMatrix(as.factor(nb_pred), as.factor(y_test), dnn = c("Predicted", "Actual"))
+
+nb_plt <- as.data.frame(nb_cm$table)
+
+ggplot(nb_plt, aes(Actual, Predicted, fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="lightblue", high="turquoise") +
+        labs(x = "Actual",y = "Prediction") +
+        scale_x_discrete(labels=c("0","1")) +
+        scale_y_discrete(labels=c("0","1"))
+
+TP <- nb_cm$table[2, 2]
+FP <- nb_cm$table[2, 1]
+
+nb_prec <- TP / (TP + FP)
+
+nb_rec <- nb_cm$byClass[["Sensitivity"]]
+
+# Calculate F1 score
+nb_f1 <- 2 * (nb_prec * nb_rec) / (nb_prec + nb_rec)
+
+# Print precision and F1 score
+print(paste("Precision:", round(nb_prec, 4)))
+print(paste("F1 Score:", round(nb_f1, 4)))
+print(paste("Accuracy: ", round(mean(nb_pred == y_test), 4)))
+```
+
+### TEST DATA
+```{r}
+test=list()
+for(i in 1:2){
+  test[[i]] = readRDS(paste('./test/test',i,'.rds',sep=''))
+}
+```
+
+```{r}
+test_data <- as.data.frame(matrix(ncol = 0, nrow = 0))
+
+for (sesnum in 1:2){
+  tmp <- test[[sesnum]]
+  len <- length(tmp$contrast_left)
+  
+  temp_data <- tibble(
+      # make the feedback binary instead of -1 and 1
+      feedback_type = (tmp$feedback_type + 1)/2, 
+      mouse = rep(0, len),
+      contrast = rep(0, len),
+      avg_spks = rep(0, len),
+      #num_spks = rep(0, len)
+      num_neu = rep(0, len)
+  )
+  
+  
+  
+  for (i in 1:len){
+    # neurons
+      temp_data$num_neu[i] <- length(unique(tmp$brain_area))
+      
+    # mouse
+      if (tmp$mouse_name == "Cori"){
+          temp_data$mouse[i] <- 1 
+      } else if (tmp$mouse_name == "Forssmann"){
+          temp_data$mouse[i] <- 2 
+      } else if (tmp$mouse_name == "Hench"){
+          temp_data$mouse[i] <- 3 
+      } else{
+          temp_data$mouse[i] <- 4 
+      }
+ 
+    # contrast
+      if (tmp$contrast_left[i] > tmp$contrast_right[i]){
+          temp_data$contrast[i] <- 1 
+      } else if (tmp$contrast_right[i] > tmp$contrast_left[i]){
+          temp_data$contrast[i] <- 2 
+      } else if (tmp$contrast_left[i] == tmp$contrast_right[i] 
+                 & tmp$contrast_left[i] == 0){
+          temp_data$contrast[i] <- 3 
+      } else{
+          temp_data$contrast[i] <- 4 
+      }
+      
+    # average spikes
+      spks <- tmp$spks[[i]]
+      tspikes <- apply(spks, 1, sum)
+      #temp_data$num_spikes[i] <- sum(tspikes)
+      temp_data$avg_spks[i] <- mean(tspikes)
+  }
+  
+  # adding the data to the all_data data frame
+  test_data <- rbind(test_data, temp_data)
+}
+```
+
+```{r}
+load("knn_pred.RData")
+
+X_tester <- test_data[, -1]
+y_tester <- t(test_data[, 1])
+```
+
+```{r}
+test_pred <- knn(train = X_train, test = X_tester, cl = y_train, k = 23)
+
+test_cm <- confusionMatrix(as.factor(test_pred), as.factor(y_tester), dnn = c("Predicted", "Actual"))
+
+test_plt <- as.data.frame(test_cm$table)
+
+ggplot(test_plt, aes(Actual, Predicted, fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="lightblue", high="turquoise") +
+        labs(x = "Actual",y = "Prediction") +
+        scale_x_discrete(labels=c("0","1")) +
+        scale_y_discrete(labels=c("0","1"))
+
+TP <- test_cm$table[2, 2]
+FP <- test_cm$table[2, 1]
+
+test_prec <- TP / (TP + FP)
+
+test_rec <- test_cm$byClass[["Sensitivity"]]
+
+# Calculate F1 score
+test_f1 <- 2 * (test_prec * test_rec) / (test_prec + test_rec)
+
+# Print precision and F1 score
+print(paste("Precision:", round(test_prec, 4)))
+print(paste("F1 Score:", round(test_f1, 4)))
+print(paste("Accuracy: ", round(mean(test_pred == y_tester), 4)))
+```
+
+
